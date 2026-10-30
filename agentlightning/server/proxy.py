@@ -124,7 +124,21 @@ async def forward_request(
         log.debug("Proxying request", rollout_id=rollout_id, model=server.model, path=upstream_path)
 
         started_at = time.perf_counter()
-        response = await _send_upstream_with_retries(client=client, url=url, body=body)
+        try:
+            response = await _send_upstream_with_retries(client=client, url=url, body=body)
+        except HTTPException as exc:
+            _capture_event(
+                rollout_id=rollout_id,
+                attempt_id=attempt_id,
+                request_body=body,
+                response_body={"detail": exc.detail},
+                server=server,
+                latency_ms=(time.perf_counter() - started_at) * 1000,
+                http_status=exc.status_code,
+                status="error",
+                retry_count=_UPSTREAM_MAX_ATTEMPTS - 1,
+            )
+            raise
         latency_ms = (time.perf_counter() - started_at) * 1000
         response_body = (
             response.json() if response.headers.get("content-type", "").startswith("application/json") else {}

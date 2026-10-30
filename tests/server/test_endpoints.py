@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tests.server.conftest import MODEL_NAME
@@ -450,6 +451,66 @@ def test_proxy_error_triplet_preserves_status(client: TestClient, auth_headers: 
     assert events[0]["data"]["http_status"] == 400
     assert events[0]["data"]["status"] == "error"
     assert events[0]["data"]["error"] == {"message": "maximum context length is 32768"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_type", "status_code", "detail"),
+    [
+        (httpx.ReadTimeout, 504, "Upstream model server timed out"),
+        (httpx.ConnectError, 502, "Upstream model server request failed"),
+    ],
+)
+async def test_proxy_exhausted_transport_retries_record_error(
+    app: FastAPI,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[httpx.TransportError],
+    status_code: int,
+    detail: str,
+) -> None:
+    attempts = 0
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise error_type("backend unavailable", request=request)
+
+    async def no_backoff(**kwargs: object) -> None:
+        pass
+
+    monkeypatch.setattr("agentlightning.server.proxy._sleep_before_retry", no_backoff)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as backend,
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test", headers=auth_headers
+        ) as client,
+    ):
+        app.state.http_client = backend
+        created = await client.post("/api/rollouts", json=[{"input": "hello"}])
+        rollout_id = created.json()[0]["rollout_id"]
+        await client.post("/api/models", json=[{"model": MODEL_NAME, "endpoint": "http://model.test/v1", "version": 3}])
+        messages = [{"role": "user", "content": "hello"}]
+        response = await client.post(
+            f"/proxy/rollout/{rollout_id}/attempt/0/mode/train/openai/v1/chat/completions",
+            json={"messages": messages},
+        )
+
+        assert response.status_code == status_code
+        assert response.json() == {"detail": detail}
+        assert attempts == 6
+        assert (await client.get("/proxy/state")).json()["inflight"] == 0
+        events = (await client.get(f"/api/rollouts/{rollout_id}/events")).json()
+        assert len(events) == 1
+        assert events[0]["event_type"] == "model_request"
+        data = events[0]["data"]
+        assert data["request"]["messages"] == messages
+        assert data["response"] == response.json()
+        assert data["status"] == "error"
+        assert data["http_status"] == status_code
+        assert data["retry_count"] == 5
+        assert data["latency_ms"] >= 0
 
 
 def test_proxy_admin_endpoints(client: TestClient, auth_headers: dict[str, str]):
