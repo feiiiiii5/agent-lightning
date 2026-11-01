@@ -39,7 +39,10 @@ def _build_auth_dependency(key: str):
             return
 
         auth_header = request.headers.get("authorization", "")
-        if auth_header.startswith("Bearer ") and auth_header[7:] == key:
+        # RFC 7235 section 2.1: the auth-scheme token is case-insensitive, and the
+        # credentials are separated from it by one or more spaces.
+        scheme, _, credentials = auth_header.partition(" ")
+        if scheme.lower() == "bearer" and credentials.lstrip(" ") == key:
             return
 
         if request.headers.get("x-api-key", "") == key:
