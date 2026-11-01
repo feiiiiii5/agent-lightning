@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from agentlightning.server.app import create_app
+
 ROLLOUTS_QUERY = {"state_in": "queuing"}
 
 
@@ -53,5 +55,26 @@ def test_extra_space_after_bearer_scheme_is_accepted(client: TestClient, auth_he
     headers = {"Authorization": f"Bearer  {token}"}
 
     response = client.get("/api/rollouts", params=ROLLOUTS_QUERY, headers=headers)
+
+    assert response.status_code == 200
+
+
+def test_key_that_begins_with_a_space_is_preserved() -> None:
+    app = create_app(
+        {
+            "key": " secret",
+            "default_proxy": {
+                "model_name": "test-model",
+                "train": {"temperature": 1},
+                "val": {"temperature": 0},
+            },
+        }
+    )
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/rollouts",
+            params=ROLLOUTS_QUERY,
+            headers={"Authorization": "Bearer  secret"},
+        )
 
     assert response.status_code == 200
